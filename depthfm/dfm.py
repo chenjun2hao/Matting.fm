@@ -111,6 +111,42 @@ class DepthFM(nn.Module):
     def decode(self, z: Tensor):
         z = 1.0 / self.scale_factor * z
         return self.vae.decode(z).sample
+    
+    @torch.no_grad()
+    def predict_matting(self, ims:Tensor, num_steps=4, ensemble_size=4):
+        if ensemble_size > 1:
+            assert ims.shape[0] == 1, "Ensemble mode only supported with batch size 1"
+            ims = ims.repeat(ensemble_size, 1, 1, 1)
+        
+        bs, dev = ims.shape[0], ims.device
+
+        context = self.encode(ims, sample_posterior=False)
+        text_embed = torch.tensor(self.empty_text_embed).to(dev).repeat(bs, 1, 1)
+        
+        x_source , t = linear_sample(context, mode='val')
+        # x_source = context
+        depth_z = self.generatev2(x_source, num_steps=num_steps, context=context, context_ca=text_embed)
+
+        alpha = self.decode(depth_z)
+        alpha = alpha.mean(dim=1, keepdim=True)
+
+        if ensemble_size > 1:
+            alpha = alpha.mean(dim=0, keepdim=True)
+        
+        alpha = per_sample_min_max_normalization(alpha.exp())
+
+        return alpha
+    
+    def generatev2(self, z: Tensor, num_steps: int = 4, n_intermediates: int = 0, **kwargs):
+        ode_kwargs = dict(method="euler", rtol=1e-5, atol=1e-5, options=dict(step_size=1.0 / num_steps))
+        t = torch.linspace(0, 1, n_intermediates + 2, device=z.device, dtype=z.dtype)
+        ode_fn = partial(self.ode_fn, **kwargs)
+        
+        ode_results = odeint(ode_fn, z, t, **ode_kwargs)
+        
+        if n_intermediates > 0:
+            return ode_results
+        return ode_results[-1]
 
 
 def sigmoid(x):
@@ -144,6 +180,39 @@ def q_sample(x_start: torch.Tensor, t: int, noise: torch.Tensor = None, n_diffus
     alpha_bar_t = torch.tensor(alpha_bar_t).to(dev).to(dtype)
 
     return torch.sqrt(alpha_bar_t) * x_start + torch.sqrt(1 - alpha_bar_t) * noise
+
+
+def gauss_sample(x_start: torch.Tensor, t: int, noise: torch.Tensor = None, n_diffusion_timesteps: int = 1000):
+    dev = x_start.device
+    dtype = x_start.dtype
+
+    noise = torch.randn_like(x_start)
+    alpha_bar_t = cosine_alpha_bar(t / n_diffusion_timesteps)
+    alpha_bar_t = torch.tensor(alpha_bar_t).to(dev).to(dtype)
+
+    noise_img = torch.sqrt(alpha_bar_t) * x_start + torch.sqrt(1 - alpha_bar_t) * noise
+    t = torch.sqrt(alpha_bar_t)
+
+    return noise_img, t
+
+
+def linear_sample(x_start, level=0.4, mode='train'):
+    dev = x_start.device
+    dtype = x_start.dtype
+    bs = x_start.shape[0]
+
+    noise = torch.randn_like(x_start)
+
+    if mode == 'train':
+        t = torch.rand((bs,), dtype=dtype, device=dev) * (1 - level)
+        t = t.view(-1, 1, 1, 1)
+    else:
+        t = torch.tensor([level] * bs, device=dev)
+        t = t.view(-1, 1, 1, 1)
+    
+    noise_img = t * x_start + (1-t) * noise
+
+    return noise_img, t
 
 
 def per_sample_min_max_normalization(x):

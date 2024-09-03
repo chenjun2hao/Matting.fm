@@ -2,3 +2,5 @@
 sandbox
 *.ckpt
 *-depth.png
+output/
+exp/
