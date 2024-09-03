@@ -25,7 +25,7 @@ Please refer to the [depthfm](https://github.com/CompVis/depth-fm) project and i
 
 
 ## 🚀 Test
-download the pretrained model from [](), and put in `exp/matting`.
+download the pretrained model from [BaiDu](), and put in `exp/matting`.
 
 ```bash
 python inference_matting.py \
